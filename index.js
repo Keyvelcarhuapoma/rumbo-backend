@@ -733,7 +733,8 @@ app.get("/api/conversations", async (req, res) => {
              ORDER BY m.created_at DESC, m.id DESC
            ) AS rn
          FROM mensajes m
-         WHERE m.sender_id = $1::uuid OR m.receiver_id = $1::uuid
+         WHERE (m.sender_id = $1::uuid AND m.deleted_for_sender = false)
+            OR (m.receiver_id = $1::uuid AND m.deleted_for_receiver = false)
        )
        SELECT
          um.other_user_id,
@@ -741,7 +742,7 @@ app.get("/api/conversations", async (req, res) => {
          u.correo_electronico,
          u.rol_usuario,
          um.id AS last_message_id,
-         um.content AS last_message,
+         CASE WHEN um.deleted_for_everyone THEN '🚫 Este mensaje fue eliminado' ELSE um.content END AS last_message,
          um.message_type,
          um.media_url,
          um.status AS last_message_status,
@@ -789,10 +790,10 @@ app.get("/api/messages", async (req, res) => {
     );
 
     const result = await db.query(
-      `SELECT id, sender_id, receiver_id, content, message_type, media_url, status, delivered_at, read_at, created_at
+      `SELECT id, sender_id, receiver_id, content, message_type, media_url, status, delivered_at, read_at, created_at, deleted_for_everyone
          FROM mensajes
-        WHERE (sender_id = $1 AND receiver_id = $2)
-           OR (sender_id = $2 AND receiver_id = $1)
+        WHERE (sender_id = $1 AND receiver_id = $2 AND deleted_for_sender = false)
+           OR (sender_id = $2 AND receiver_id = $1 AND deleted_for_receiver = false)
         ORDER BY created_at ASC
         LIMIT 100`,
       [senderId, receiverId],
@@ -916,6 +917,43 @@ app.put("/api/messages/read", async (req, res) => {
   } catch (error) {
     console.error("[PUT /api/messages/read]", error);
     res.status(500).json({ error: "Error al marcar mensajes como leidos" });
+  }
+});
+
+app.delete("/api/messages/:id", async (req, res) => {
+  const { id } = req.params;
+  const { userId, type } = req.query; // type = 'for_me' | 'for_everyone'
+
+  try {
+    const msgResult = await db.query(`SELECT sender_id, receiver_id FROM mensajes WHERE id = $1`, [id]);
+    if (msgResult.rows.length === 0) return res.status(404).json({ error: "Mensaje no encontrado" });
+
+    const msg = msgResult.rows[0];
+
+    if (type === 'for_everyone') {
+      if (msg.sender_id !== userId) return res.status(403).json({ error: "No tienes permiso" });
+      
+      await db.query(`UPDATE mensajes SET deleted_for_everyone = true WHERE id = $1`, [id]);
+      
+      io.to(userRoom(msg.receiver_id)).emit("message_deleted_for_everyone", { messageId: id });
+    } else { // for_me
+      if (msg.sender_id === userId) {
+        await db.query(`UPDATE mensajes SET deleted_for_sender = true WHERE id = $1`, [id]);
+      } else if (msg.receiver_id === userId) {
+        await db.query(`UPDATE mensajes SET deleted_for_receiver = true WHERE id = $1`, [id]);
+      } else {
+        return res.status(403).json({ error: "No tienes permiso" });
+      }
+    }
+    
+    // Update conversation list for both users
+    io.to(userRoom(msg.sender_id)).emit("conversations_updated", { userId: msg.sender_id });
+    io.to(userRoom(msg.receiver_id)).emit("conversations_updated", { userId: msg.receiver_id });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[DELETE /api/messages]", error);
+    res.status(500).json({ error: "Error al borrar mensaje" });
   }
 });
 
