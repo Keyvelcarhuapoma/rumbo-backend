@@ -296,12 +296,12 @@ io.on("connection", (socket) => {
 
   socket.on("send_community_message", async (data) => {
     try {
-      const { community_id, sender_id, content } = data;
+      const { community_id, sender_id, content, message_type = 'text', media_url = null } = data;
       if (community_id && sender_id && content) {
         const result = await db.query(
-          `INSERT INTO mensajes_comunidad (community_id, sender_id, content)
-           VALUES ($1, $2, $3) RETURNING *`,
-          [community_id, sender_id, content]
+          `INSERT INTO mensajes_comunidad (community_id, sender_id, content, message_type, media_url)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+          [community_id, sender_id, content, message_type, media_url]
         );
         // Include sender info
         const userRes = await db.query(
@@ -498,6 +498,37 @@ app.delete("/api/users/block", async (req, res) => {
   } catch (error) {
     console.error("Error desbloquear:", error);
     res.status(500).json({ error: "Error al desbloquear usuario" });
+  }
+});
+
+// ─────────────────────────────────────────────
+// ENDPOINT: Verificar si un usuario está bloqueado
+// GET /api/users/check-block?userId1=...&userId2=...
+// ─────────────────────────────────────────────
+app.get("/api/users/check-block", async (req, res) => {
+  try {
+    const { userId1, userId2 } = req.query;
+    if (!userId1 || !userId2) {
+      return res.status(400).json({ error: "Faltan parámetros" });
+    }
+    const result = await db.query(
+      `SELECT id_bloqueador 
+       FROM usuarios_bloqueados 
+       WHERE (id_bloqueador = $1::uuid AND id_bloqueado = $2::uuid)
+          OR (id_bloqueador = $2::uuid AND id_bloqueado = $1::uuid)
+       LIMIT 1`,
+      [userId1, userId2]
+    );
+    if (result.rows.length > 0) {
+      return res.json({ 
+        isBlocked: true, 
+        blockedByMe: result.rows[0].id_bloqueador === userId1 
+      });
+    }
+    res.json({ isBlocked: false, blockedByMe: false });
+  } catch (error) {
+    console.error("Error check-block:", error);
+    res.status(500).json({ error: "Error al verificar bloqueo" });
   }
 });
 
@@ -1435,6 +1466,76 @@ app.post("/api/trip-requests", async (req, res) => {
   }
 });
 
+// 11.6 Obtener solicitudes de viaje pendientes (Para conductores)
+app.get("/api/trip-requests", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT sr.*, u.nombre_completo as nombre_pasajero, u.foto_perfil as avatar_pasajero
+       FROM solicitudes_viaje sr
+       JOIN usuarios u ON sr.id_pasajero = u.id_usuario
+       WHERE sr.estado = 'pendiente'
+       ORDER BY sr.fecha_creacion DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error al obtener solicitudes de viaje:", error);
+    res.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+// 11.7 Conductor acepta una solicitud de viaje
+app.post("/api/trips/accept-request", async (req, res) => {
+  try {
+    const { id_solicitud, id_conductor, id_vehiculo } = req.body;
+    
+    // 1. Verificar que la solicitud existe y está pendiente
+    const solicitudRes = await db.query(
+      `SELECT * FROM solicitudes_viaje WHERE id_solicitud = $1 AND estado = 'pendiente'`,
+      [id_solicitud]
+    );
+    
+    if (solicitudRes.rows.length === 0) {
+      return res.status(400).json({ error: "La solicitud ya no está disponible" });
+    }
+    
+    const solicitud = solicitudRes.rows[0];
+    
+    // 2. Crear el viaje activo
+    const viajeRes = await db.query(
+      `INSERT INTO viajes 
+       (id_conductor, id_vehiculo, origen_viaje, destino_viaje, fecha_hora_salida, precio_asiento, estado_viaje, tipo_viaje)
+       VALUES ($1, $2, $3, $4, NOW(), 0, 'disponible', 'inmediato')
+       RETURNING *`,
+      [id_conductor, id_vehiculo, solicitud.origen, solicitud.destino]
+    );
+    
+    const nuevoViaje = viajeRes.rows[0];
+    
+    // 3. Añadir al pasajero al viaje
+    await db.query(
+      `INSERT INTO pasajeros_viaje (id_viaje, id_pasajero, estado_reserva)
+       VALUES ($1, $2, 'confirmada')`,
+      [nuevoViaje.id_viaje, solicitud.id_pasajero]
+    );
+    
+    // 4. Actualizar la solicitud a aceptada
+    await db.query(
+      `UPDATE solicitudes_viaje SET estado = 'aceptado' WHERE id_solicitud = $1`,
+      [id_solicitud]
+    );
+    
+    // 5. Emitir eventos socket
+    io.emit("trip_request_accepted", { id_solicitud, viaje: nuevoViaje });
+    io.emit("trip_created", nuevoViaje);
+    
+    res.json({ message: "Solicitud aceptada exitosamente", viaje: nuevoViaje });
+  } catch (error) {
+    console.error("Error al aceptar solicitud de viaje:", error);
+    res.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+
 // 12. Obtener viajes del conductor
 app.get("/api/trips/driver/:userId", async (req, res) => {
   try {
@@ -2342,7 +2443,10 @@ app.post("/api/tickets", async (req, res) => {
       ],
     );
 
-    res.status(201).json(result.rows[0]);
+    const newTicket = result.rows[0];
+    io.emit("new_support_ticket", newTicket);
+
+    res.status(201).json(newTicket);
   } catch (error) {
     console.error(error);
     res.status(error.statusCode || 500).json({
@@ -2630,6 +2734,39 @@ app.get("/api/community/match", async (req, res) => {
   } catch(e) {
     console.error(e);
     res.status(500).json({error: "Server error"});
+  }
+});
+
+// ==========================================
+// OTA - AUTO-ACTUALIZACIÓN
+// ==========================================
+app.get("/api/config/version", async (req, res) => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS app_config (
+        id SERIAL PRIMARY KEY,
+        version_name VARCHAR(50) NOT NULL,
+        version_code INT NOT NULL,
+        download_url TEXT NOT NULL,
+        is_mandatory BOOLEAN DEFAULT false,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Comprobar si está vacía
+    const countRes = await db.query('SELECT COUNT(*) FROM app_config');
+    if (parseInt(countRes.rows[0].count) === 0) {
+      await db.query(`
+        INSERT INTO app_config (version_name, version_code, download_url, is_mandatory) 
+        VALUES ('1.0.0', 1, 'https://github.com/RumboApp', false);
+      `);
+    }
+
+    const configRes = await db.query('SELECT * FROM app_config ORDER BY id DESC LIMIT 1');
+    res.json(configRes.rows[0]);
+  } catch (error) {
+    console.error("Error al obtener config:", error);
+    res.status(500).json({ error: "Error obteniendo configuración" });
   }
 });
 

@@ -2,33 +2,35 @@ const db = require('./db');
 
 async function migrate() {
   try {
+    console.log("Creando tabla app_config...");
     await db.query(`
-      CREATE TABLE IF NOT EXISTS configuracion_campus (
-          id SERIAL PRIMARY KEY,
-          id_universidad UUID REFERENCES universidades(id_universidad),
-          validacion_dominio BOOLEAN DEFAULT true,
-          bloqueo_egresados BOOLEAN DEFAULT true,
-          restriccion_horarios BOOLEAN DEFAULT false,
-          carpooling_obligatorio BOOLEAN DEFAULT false,
-          monedero_universitario BOOLEAN DEFAULT false,
-          filtro_genero BOOLEAN DEFAULT true,
-          enlace_sos BOOLEAN DEFAULT true
+      CREATE TABLE IF NOT EXISTS app_config (
+        id SERIAL PRIMARY KEY,
+        version_name VARCHAR(50) NOT NULL,
+        version_code INT NOT NULL,
+        download_url TEXT NOT NULL,
+        is_mandatory BOOLEAN DEFAULT false,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log('Table created');
-    
-    const count = await db.query('SELECT COUNT(*) FROM configuracion_campus');
-    if (parseInt(count.rows[0].count) === 0) {
+
+    console.log("Verificando si existe la configuración...");
+    const res = await db.query('SELECT COUNT(*) FROM app_config');
+    if (parseInt(res.rows[0].count) === 0) {
+      console.log("Insertando configuración inicial...");
       await db.query(`
-        INSERT INTO configuracion_campus (id_universidad)
-        SELECT id_universidad FROM universidades LIMIT 1;
+        INSERT INTO app_config (version_name, version_code, download_url, is_mandatory) 
+        VALUES ('1.0.0', 1, 'https://github.com', false);
       `);
-      console.log('Inserted default config');
+    } else {
+      console.log("La tabla ya tiene datos.");
     }
-  } catch (e) {
-    console.error(e);
-  } finally {
+
+    console.log("¡Migración completada exitosamente!");
     process.exit(0);
+  } catch (error) {
+    console.error("Error en la migración:", error);
+    process.exit(1);
   }
 }
 
