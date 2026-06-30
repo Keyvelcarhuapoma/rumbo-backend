@@ -579,6 +579,27 @@ app.get("/api/users/check-block", async (req, res) => {
     await db.query(
       `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE;`,
     );
+    await db.query(
+      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_everyone BOOLEAN DEFAULT false;`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_sender BOOLEAN DEFAULT false;`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_receiver BOOLEAN DEFAULT false;`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS message_type VARCHAR(20) NOT NULL DEFAULT 'text';`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS media_url TEXT;`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'sent';`,
+    );
+    await db.query(
+      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS read_by TEXT[] DEFAULT '{}';`,
+    );
     // Índice para acelerar consultas por conversación
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_mensajes_conversacion
