@@ -983,13 +983,41 @@ app.delete("/api/messages/:id", async (req, res) => {
 const sendEmail = async (to, subject, htmlContent) => {
   if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS,
-        },
-      });
+      const emailUserLower = process.env.EMAIL_USER.toLowerCase();
+      const isOutlook = emailUserLower.includes("@outlook.") ||
+                        emailUserLower.includes("@hotmail.") ||
+                        emailUserLower.includes("@live.");
+
+      const transportConfig = process.env.EMAIL_HOST
+        ? {
+            host: process.env.EMAIL_HOST,
+            port: Number(process.env.EMAIL_PORT) || 587,
+            secure: process.env.EMAIL_SECURE === "true",
+            auth: {
+              user: process.env.EMAIL_USER,
+              pass: process.env.EMAIL_PASS,
+            },
+          }
+        : isOutlook
+          ? {
+              host: "smtp-mail.outlook.com",
+              port: 587,
+              secure: false,
+              tls: { ciphers: "SSLv3" },
+              auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+              },
+            }
+          : {
+              service: "gmail",
+              auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+              },
+            };
+
+      const transporter = nodemailer.createTransport(transportConfig);
       await transporter.sendMail({
         from: '"Rumbo App" <' + process.env.EMAIL_USER + ">",
         to,
