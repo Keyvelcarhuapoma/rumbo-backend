@@ -18,3 +18,5 @@ npm start
 ```
 
 El archivo `.env` debe tener la configuracion de PostgreSQL y demas claves del backend.
+
+TIRAME TU GAAAAAAAAAA
