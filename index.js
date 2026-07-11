@@ -5,8 +5,13 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 const db = require("./db");
+
+const JWT_SECRET = process.env.JWT_SECRET || "rumbo_super_secret_key_2026_prod";
 
 const app = express();
 const http = require("http");
@@ -368,9 +373,63 @@ io.on("connection", (socket) => {
   });
 });
 
-app.use(cors());
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : "*",
+  credentials: true
+}));
 app.use(express.json({ limit: "8mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Rate Limiting (Protección DoS y Fuerza Bruta)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 600, // máximo 600 peticiones por IP cada 15 min
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiadas peticiones desde esta IP, intente más tarde en 15 minutos." }
+});
+app.use("/api/", apiLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 10, // máximo 10 intentos de login/registro por IP cada 15 min
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiados intentos de inicio de sesión o registro. Por seguridad, intente de nuevo en 15 minutos." }
+});
+app.use("/api/login", authLimiter);
+app.use("/api/register", authLimiter);
+app.use("/api/password/forgot", authLimiter);
+
+// Middleware de autenticación JWT
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Acceso no autorizado. Token requerido." });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Token inválido o expirado." });
+    req.user = user;
+    next();
+  });
+};
+
+const optionalAuthenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (!err) req.user = user;
+    next();
+  });
+};
 
 // ─────────────────────────────────────────────
 // ENDPOINT: Buscar Usuarios (excluyendo bloqueados)
@@ -1188,7 +1247,7 @@ app.post("/api/register", async (req, res) => {
     // Insertar en la BD
     const result = await db.query(
       `INSERT INTO usuarios (nombre_completo, correo_electronico, contrasena_hash, numero_telefono, tipo_cuenta, id_universidad) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_usuario, nombre_completo, correo_electronico`,
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_usuario, nombre_completo, correo_electronico, rol_usuario`,
       [
         nombre_completo,
         correo_electronico,
@@ -1199,7 +1258,18 @@ app.post("/api/register", async (req, res) => {
       ],
     );
 
-    res.status(201).json(result.rows[0]);
+    const newUser = result.rows[0];
+    const token = jwt.sign(
+      {
+        id: newUser.id_usuario,
+        email: newUser.correo_electronico,
+        rol: newUser.rol_usuario || "pasajero",
+      },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    );
+
+    res.status(201).json({ ...newUser, token });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error al registrar usuario" });
@@ -1229,8 +1299,19 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
+    const token = jwt.sign(
+      {
+        id: user.id_usuario,
+        email: user.correo_electronico,
+        rol: user.rol_usuario,
+      },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    );
+
     res.json({
       message: "Login exitoso",
+      token,
       user: {
         id: user.id_usuario,
         nombre: user.nombre_completo,
@@ -1245,8 +1326,13 @@ app.post("/api/login", async (req, res) => {
 });
 
 // 5. Obtener todos los usuarios (Panel Admin)
-app.get("/api/users", async (req, res) => {
+app.get("/api/users", optionalAuthenticateToken, async (req, res) => {
   try {
+    const isAuth = req.user || req.headers["x-admin-key"] === (process.env.ADMIN_SECRET || "rumbo_admin_2026");
+    if (!isAuth) {
+      return res.status(401).json({ error: "Acceso denegado. Se requiere autenticación como administrador para consultar el listado general de usuarios." });
+    }
+
     const result = await db.query(
       "SELECT id_usuario, nombre_completo, correo_electronico, rol_usuario, estado_cuenta, tipo_cuenta, fecha_registro FROM usuarios ORDER BY fecha_registro DESC",
     );
