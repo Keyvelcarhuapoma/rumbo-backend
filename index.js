@@ -14,6 +14,18 @@ const db = require("./db");
 const JWT_SECRET = process.env.JWT_SECRET || "rumbo_super_secret_key_2026_prod";
 
 const app = express();
+app.set("trust proxy", 1);
+
+// Redirección de seguridad a HTTPS cuando se ejecuta en producción detrás de un proxy (Render, Railway, Heroku)
+app.use((req, res, next) => {
+  if (process.env.NODE_ENV === "production" && process.env.ALLOW_HTTP !== "true") {
+    if (req.headers["x-forwarded-proto"] && req.headers["x-forwarded-proto"] !== "https") {
+      return res.redirect(`https://${req.headers.host}${req.url}`);
+    }
+  }
+  next();
+});
+
 const http = require("http");
 const server = http.createServer(app);
 const { Server } = require("socket.io");
@@ -82,10 +94,15 @@ function saveCentinelaAudio({ audio_nombre, audio_base64 }) {
     throw error;
   }
 
-  const audioDir = path.join(__dirname, "uploads", "centinela-audio");
+  const audioDir = path.resolve(__dirname, "uploads", "centinela-audio");
   fs.mkdirSync(audioDir, { recursive: true });
-  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${extension}`;
-  fs.writeFileSync(path.join(audioDir, fileName), buffer);
+  const safeExt = extension.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${safeExt}`;
+  const targetPath = path.resolve(audioDir, fileName);
+  if (!targetPath.startsWith(audioDir)) {
+    throw new Error("Ruta de archivo no válida");
+  }
+  fs.writeFileSync(targetPath, buffer);
   return `/uploads/centinela-audio/${fileName}`;
 }
 
@@ -1083,12 +1100,12 @@ const sendEmail = async (to, subject, htmlContent) => {
         subject,
         html: htmlContent,
       });
-      console.log(`[RUMBO EMAIL] Enviado a ${to}: ${subject}`);
+      console.log("[RUMBO EMAIL] Enviado a %s: %s", String(to), String(subject));
     } catch (error) {
-      console.error(`[RUMBO EMAIL ERROR] No se pudo enviar a ${to}`, error);
+      console.error("[RUMBO EMAIL ERROR] No se pudo enviar a %s", String(to), error);
     }
   } else {
-    console.log(`[RUMBO SIMULADO EMAIL a ${to}] Asunto: ${subject}`);
+    console.log("[RUMBO SIMULADO EMAIL a %s] Asunto: %s", String(to), String(subject));
   }
 };
 
@@ -2686,7 +2703,7 @@ app.put("/api/tickets/:id/status", async (req, res) => {
 function saveWalletReceipt({ comprobante_nombre, comprobante_base64 }) {
   if (!comprobante_base64) return null;
 
-  const rawName = comprobante_nombre || "comprobante.jpg";
+  const rawName = String(comprobante_nombre || "comprobante.jpg");
   const ext = path.extname(rawName).toLowerCase() || ".jpg";
   const allowed = new Set([".jpg", ".jpeg", ".png", ".webp", ".pdf"]);
   if (!allowed.has(ext)) {
@@ -2705,17 +2722,22 @@ function saveWalletReceipt({ comprobante_nombre, comprobante_base64 }) {
     throw error;
   }
 
-  const receiptsDir = path.join(__dirname, "uploads", "wallet-receipts");
+  const receiptsDir = path.resolve(__dirname, "uploads", "wallet-receipts");
   fs.mkdirSync(receiptsDir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}${ext}`;
-  fs.writeFileSync(path.join(receiptsDir, fileName), buffer);
+  const safeExt = ext.replace(/[^a-z0-9.]/g, "");
+  const fileName = `${crypto.randomUUID()}${safeExt}`;
+  const targetPath = path.resolve(receiptsDir, fileName);
+  if (!targetPath.startsWith(receiptsDir)) {
+    throw new Error("Ruta de archivo no válida");
+  }
+  fs.writeFileSync(targetPath, buffer);
   return `/uploads/wallet-receipts/${fileName}`;
 }
 
 function saveSupportEvidence({ evidencia_nombre, evidencia_base64 }) {
   if (!evidencia_base64) return null;
 
-  const rawName = evidencia_nombre || "evidencia.jpg";
+  const rawName = String(evidencia_nombre || "evidencia.jpg");
   const ext = path.extname(rawName).toLowerCase() || ".jpg";
   const allowed = new Set([".jpg", ".jpeg", ".png", ".webp", ".pdf", ".mp4"]);
   if (!allowed.has(ext)) {
@@ -2734,10 +2756,15 @@ function saveSupportEvidence({ evidencia_nombre, evidencia_base64 }) {
     throw error;
   }
 
-  const evidenceDir = path.join(__dirname, "uploads", "support-evidence");
+  const evidenceDir = path.resolve(__dirname, "uploads", "support-evidence");
   fs.mkdirSync(evidenceDir, { recursive: true });
-  const fileName = `${crypto.randomUUID()}${ext}`;
-  fs.writeFileSync(path.join(evidenceDir, fileName), buffer);
+  const safeExt = ext.replace(/[^a-z0-9.]/g, "");
+  const fileName = `${crypto.randomUUID()}${safeExt}`;
+  const targetPath = path.resolve(evidenceDir, fileName);
+  if (!targetPath.startsWith(evidenceDir)) {
+    throw new Error("Ruta de archivo no válida");
+  }
+  fs.writeFileSync(targetPath, buffer);
   return `/uploads/support-evidence/${fileName}`;
 }
 

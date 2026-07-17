@@ -18,8 +18,12 @@
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^8.0.7",
+    "nodemailer": "^9.0.1",
     "pg": "^8.20.0",
     "socket.io": "^4.8.3"
+  },
+  "overrides": {
+    "ws": "^8.21.0",
+    "qs": "^6.15.2"
   }
 }
