@@ -1750,7 +1750,15 @@ app.get("/api/trips/driver/:userId", async (req, res) => {
 app.get("/api/trips/available", async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT v.*, u.nombre_completo as nombre_conductor, ve.marca, ve.modelo, ve.placa, ve.color
+      `SELECT v.*, u.nombre_completo as nombre_conductor, ve.marca, ve.modelo, ve.placa, ve.color, ve.tipo_vehiculo,
+       (
+         SELECT COALESCE(json_agg(asientos), '[]'::json)
+         FROM (
+           SELECT jsonb_array_elements_text(pv.asientos_seleccionados)::int AS asientos
+           FROM pasajeros_viaje pv
+           WHERE pv.id_viaje = v.id_viaje AND pv.estado_reserva = 'confirmada'
+         ) as sub
+       ) as ocupados
        FROM viajes v
        JOIN usuarios u ON v.id_conductor = u.id_usuario
        LEFT JOIN vehiculos ve ON v.id_vehiculo = ve.id_vehiculo
@@ -1811,8 +1819,12 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
   const client = await db.pool.connect();
   try {
     const { tripId } = req.params;
-    const { id_pasajero, asientos_reservados, metodo_pago } = req.body;
-    const seats = Number(asientos_reservados || 1);
+    const { id_pasajero, asientos_reservados, asientos_seleccionados, metodo_pago } = req.body;
+    
+    let selectedSeatsArr = asientos_seleccionados || [];
+    if (!Array.isArray(selectedSeatsArr)) selectedSeatsArr = [];
+    
+    const seats = Number(selectedSeatsArr.length > 0 ? selectedSeatsArr.length : (asientos_reservados || 1));
     const paymentMethod = metodo_pago || "billetera";
 
     if (!id_pasajero || !Number.isInteger(seats) || seats <= 0) {
@@ -1844,6 +1856,21 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
       return res
         .status(400)
         .json({ error: "No hay suficientes asientos disponibles" });
+    }
+
+    if (selectedSeatsArr.length > 0) {
+      const occupiedQuery = await client.query(
+        `SELECT jsonb_array_elements_text(asientos_seleccionados)::int AS asiento
+         FROM pasajeros_viaje
+         WHERE id_viaje = $1 AND estado_reserva = 'confirmada'`,
+        [tripId]
+      );
+      const occupiedSeats = occupiedQuery.rows.map(r => Number(r.asiento));
+      const hasConflict = selectedSeatsArr.some(s => occupiedSeats.includes(Number(s)));
+      if (hasConflict) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "Uno o más de los asientos seleccionados ya fueron reservados por otra persona." });
+      }
     }
 
     const alreadyBooked = await client.query(
@@ -1893,10 +1920,10 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
 
     const booking = await client.query(
       `INSERT INTO pasajeros_viaje
-        (id_viaje, id_pasajero, asientos_reservados, estado_reserva, monto_pagado, estado_pago, metodo_pago)
-       VALUES ($1, $2, $3, 'confirmada', $4, 'pagado', $5)
+        (id_viaje, id_pasajero, asientos_reservados, asientos_seleccionados, estado_reserva, monto_pagado, estado_pago, metodo_pago)
+       VALUES ($1, $2, $3, $4, 'confirmada', $5, 'pagado', $6)
        RETURNING *`,
-      [tripId, id_pasajero, seats, totalAmount, paymentMethod],
+      [tripId, id_pasajero, seats, JSON.stringify(selectedSeatsArr), totalAmount, paymentMethod],
     );
 
     await client.query(
@@ -2044,7 +2071,7 @@ app.get("/api/earnings/:userId", async (req, res) => {
   }
 });
 
-// 18. Registrar transacción de billetera
+// 19. Registrar transacción de billetera
 app.post("/api/transactions", async (req, res) => {
   try {
     const { id_usuario, tipo_transaccion, monto, id_viaje_relacionado } =
