@@ -1694,7 +1694,7 @@ app.post("/api/trips/accept-request", async (req, res) => {
     const viajeRes = await db.query(
       `INSERT INTO viajes 
        (id_conductor, id_vehiculo, origen_viaje, destino_viaje, fecha_hora_salida, precio_asiento, estado_viaje, tipo_viaje)
-       VALUES ($1, $2, $3, $4, NOW(), 0, 'disponible', 'inmediato')
+       VALUES ($1, $2, $3, $4, NOW(), 0, 'programado', 'inmediato')
        RETURNING *`,
       [id_conductor, id_vehiculo, solicitud.origen, solicitud.destino]
     );
@@ -2447,6 +2447,25 @@ app.post("/api/alerts", async (req, res) => {
     };
     io.emit("centinela_alert", payload);
     io.emit("support_emergency", payload);
+
+    // Enviar correo a Valery o al administrador
+    try {
+      const emailDest = process.env.SUPPORT_EMAIL || "Valery@hotmail.com";
+      const subject = `🚨 EMERGENCIA CENTINELA ACTIVADA: ${safeDescription}`;
+      const htmlContent = `
+        <h2>Alerta de Emergencia Centinela</h2>
+        <p><strong>Usuario ID:</strong> ${safeUserId}</p>
+        <p><strong>Tipo:</strong> ${safeActivation}</p>
+        <p><strong>Descripción:</strong> ${safeDescription}</p>
+        <p><strong>Ubicación:</strong> <a href="https://www.google.com/maps/search/?api=1&query=${safeLatitude},${safeLongitude}">Ver en el mapa</a></p>
+        <p><strong>Transcripción:</strong> ${transcript || 'No disponible'}</p>
+        <p>Por favor revisa el panel de soporte para más detalles.</p>
+      `;
+      await sendEmail(emailDest, subject, htmlContent);
+    } catch (emailErr) {
+      console.error("Error al enviar email de centinela a Valery:", emailErr);
+    }
+
     res.status(201).json(payload);
   } catch (error) {
     console.error(error);
@@ -2980,7 +2999,7 @@ setInterval(async () => {
       UPDATE viajes 
       SET estado_viaje = 'cancelado' 
       WHERE estado_viaje = 'programado' 
-        AND fecha_hora_salida < NOW()
+        AND fecha_hora_salida < NOW() - INTERVAL '30 minutes'
     `);
     
     // Expirar solicitudes pendientes que ya pasaron
@@ -2988,7 +3007,7 @@ setInterval(async () => {
       UPDATE solicitudes_viaje 
       SET estado = 'expirado' 
       WHERE estado = 'pendiente' 
-        AND fecha_hora_solicitada < NOW()
+        AND fecha_hora_solicitada < NOW() - INTERVAL '30 minutes'
     `);
   } catch (error) {
     console.error("Error al limpiar viajes/solicitudes expirados:", error);
