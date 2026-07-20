@@ -295,7 +295,18 @@ io.on("connection", (socket) => {
 });
 
 app.use(cors());
-app.use(express.json({ limit: "8mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+app.get("/api/test-db", async (req, res) => {
+  try {
+    await db.query("SELECT 1 AS ok");
+    res.json({ status: "ok" });
+  } catch (error) {
+    res.json({ status: "error", message: error.message, stack: error.stack });
+  }
+});
+
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ─────────────────────────────────────────────
@@ -1018,9 +1029,51 @@ app.post("/api/login", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error en el servidor" });
-  }
-});
+      res.status(500).json({ error: "Error en el servidor" });
+    }
+  });
+
+  // 4.5 Iniciar SesiÃ³n con Google
+  app.post("/api/google-login", async (req, res) => {
+    try {
+      const { correo_electronico, nombre_completo } = req.body;
+  
+      let userResult = await db.query(
+        "SELECT * FROM usuarios WHERE LOWER(correo_electronico) = LOWER($1)",
+        [correo_electronico],
+      );
+      
+      let user;
+      if (userResult.rows.length === 0) {
+        // Registrar al usuario automÃ¡ticamente
+        const esConductor = correo_electronico.endsWith('@gmail.com') || correo_electronico.endsWith('@hotmail.com');
+        const tipoCuenta = esConductor ? 'conductor' : 'pasajero';
+        const dummyPassword = await bcrypt.hash("GoogleLogin123!", await bcrypt.genSalt(10));
+        
+        const insertResult = await db.query(
+          `INSERT INTO usuarios (nombre_completo, correo_electronico, contrasena_hash, numero_telefono, tipo_cuenta, id_universidad) 
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+          [nombre_completo, correo_electronico, dummyPassword, "G-" + Date.now().toString().slice(-8), tipoCuenta, null]
+        );
+        user = insertResult.rows[0];
+      } else {
+        user = userResult.rows[0];
+      }
+  
+      res.json({
+        message: "Login con Google exitoso",
+        user: {
+          id: user.id_usuario,
+          nombre: user.nombre_completo,
+          email: user.correo_electronico,
+          rol: user.rol_usuario,
+        },
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error en el servidor durante Google Login" });
+    }
+  });
 
 // 5. Obtener todos los usuarios (Panel Admin)
 app.get("/api/users", async (req, res) => {
