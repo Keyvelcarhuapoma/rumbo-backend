@@ -16,5 +16,5 @@ Remove-Item -Recurse -Force node_modules
 npm install
 npm start
 ```
-..
+
 El archivo `.env` debe tener la configuracion de PostgreSQL y demas claves del backend.

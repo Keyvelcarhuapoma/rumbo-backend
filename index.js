@@ -5,27 +5,10 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const jwt = require("jsonwebtoken");
-const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 const db = require("./db");
 
-const JWT_SECRET = process.env.JWT_SECRET || "rumbo_super_secret_key_2026_prod";
-
 const app = express();
-app.set("trust proxy", 1);
-
-// Redirección de seguridad a HTTPS cuando se ejecuta en producción detrás de un proxy (Render, Railway, Heroku)
-app.use((req, res, next) => {
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_HTTP !== "true") {
-    if (req.headers["x-forwarded-proto"] && req.headers["x-forwarded-proto"] !== "https") {
-      return res.redirect(`https://${req.headers.host}${req.url}`);
-    }
-  }
-  next();
-});
-
 const http = require("http");
 const server = http.createServer(app);
 const { Server } = require("socket.io");
@@ -94,15 +77,10 @@ function saveCentinelaAudio({ audio_nombre, audio_base64 }) {
     throw error;
   }
 
-  const audioDir = path.resolve(__dirname, "uploads", "centinela-audio");
+  const audioDir = path.join(__dirname, "uploads", "centinela-audio");
   fs.mkdirSync(audioDir, { recursive: true });
-  const safeExt = extension.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${safeExt}`;
-  const targetPath = path.resolve(audioDir, fileName);
-  if (!targetPath.startsWith(audioDir)) {
-    throw new Error("Ruta de archivo no válida");
-  }
-  fs.writeFileSync(targetPath, buffer);
+  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${extension}`;
+  fs.writeFileSync(path.join(audioDir, fileName), buffer);
   return `/uploads/centinela-audio/${fileName}`;
 }
 
@@ -296,93 +274,19 @@ io.on("connection", (socket) => {
     console.log(`User joined room: ${data.room}`);
   });
 
-  socket.on("send_message", async (data) => {
-    try {
-      const callerId = data.senderId;
-      const receiverId = data.receiverId;
-      if (callerId && receiverId) {
-        const blocked = await db.query(
-          `SELECT 1 FROM usuarios_bloqueados
-           WHERE (id_bloqueador = $1::uuid AND id_bloqueado = $2::uuid)
-              OR (id_bloqueador = $2::uuid AND id_bloqueado = $1::uuid)
-           LIMIT 1`,
-          [callerId, receiverId]
-        );
-        if (blocked.rows.length > 0) return; // Ignore message
-      }
-      socket.to(data.room).emit("receive_message", data);
-    } catch (e) {
-      console.error("Error in send_message socket:", e);
-    }
+  socket.on("send_message", (data) => {
+    socket.to(data.room).emit("receive_message", data);
   });
 
-  socket.on("send_community_message", async (data) => {
-    try {
-      const { community_id, sender_id, content, message_type = 'text', media_url = null } = data;
-      if (community_id && sender_id && content) {
-        const result = await db.query(
-          `INSERT INTO mensajes_comunidad (community_id, sender_id, content, message_type, media_url)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-          [community_id, sender_id, content, message_type, media_url]
-        );
-        // Include sender info
-        const userRes = await db.query(
-          `SELECT nombre_completo, foto_perfil_url FROM usuarios WHERE id_usuario = $1`,
-          [sender_id]
-        );
-        const msg = result.rows[0];
-        if (userRes.rows.length > 0) {
-          msg.sender_name = userRes.rows[0].nombre_completo;
-          msg.sender_avatar = userRes.rows[0].foto_perfil_url;
-        }
-        
-        io.to(community_id).emit("receive_community_message", msg);
-      }
-    } catch (e) {
-      console.error("Error in send_community_message:", e);
-    }
-  });
-
-  socket.on("start_call", async (data = {}) => {
+  socket.on("start_call", (data = {}) => {
     if (!data.receiverId || !data.callID || !data.callerId) return;
-    try {
-      const blocked = await db.query(
-        `SELECT 1
-         FROM usuarios_bloqueados
-        WHERE (id_bloqueador = $1::uuid AND id_bloqueado = $2::uuid)
-           OR (id_bloqueador = $2::uuid AND id_bloqueado = $1::uuid)
-        LIMIT 1`,
-        [data.callerId, data.receiverId]
-      );
-      if (blocked.rows.length > 0) {
-        return io.to(userRoom(data.callerId)).emit("call_rejected", { reason: "blocked" });
-      }
-
-      io.to(userRoom(data.receiverId)).emit("incoming_call", {
-        callID: data.callID,
-        callerId: data.callerId,
-        callerName: data.callerName || "Contacto",
-        receiverId: data.receiverId,
-        isVideo: data.isVideo !== false,
-      });
-    } catch (error) {
-      console.error("Error al iniciar llamada:", error);
-    }
-  });
-
-  socket.on("accept_call", (data = {}) => {
-    if (!data.callerId) return;
-    io.to(userRoom(data.callerId)).emit("call_accepted", data);
-  });
-
-  socket.on("reject_call", (data = {}) => {
-    if (!data.callerId) return;
-    io.to(userRoom(data.callerId)).emit("call_rejected", data);
-  });
-
-  socket.on("cancel_call", (data = {}) => {
-    if (!data.receiverId) return;
-    io.to(userRoom(data.receiverId)).emit("call_cancelled", data);
+    io.to(userRoom(data.receiverId)).emit("incoming_call", {
+      callID: data.callID,
+      callerId: data.callerId,
+      callerName: data.callerName || "Contacto",
+      receiverId: data.receiverId,
+      isVideo: data.isVideo !== false,
+    });
   });
 
   socket.on("disconnect", () => {
@@ -390,63 +294,9 @@ io.on("connection", (socket) => {
   });
 });
 
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : "*",
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json({ limit: "8mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-// Rate Limiting (Protección DoS y Fuerza Bruta)
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 600, // máximo 600 peticiones por IP cada 15 min
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Demasiadas peticiones desde esta IP, intente más tarde en 15 minutos." }
-});
-app.use("/api/", apiLimiter);
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 10, // máximo 10 intentos de login/registro por IP cada 15 min
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Demasiados intentos de inicio de sesión o registro. Por seguridad, intente de nuevo en 15 minutos." }
-});
-app.use("/api/login", authLimiter);
-app.use("/api/register", authLimiter);
-app.use("/api/password/forgot", authLimiter);
-
-// Middleware de autenticación JWT
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Acceso no autorizado. Token requerido." });
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Token inválido o expirado." });
-    req.user = user;
-    next();
-  });
-};
-
-const optionalAuthenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) {
-    req.user = null;
-    return next();
-  }
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (!err) req.user = user;
-    next();
-  });
-};
 
 // ─────────────────────────────────────────────
 // ENDPOINT: Buscar Usuarios (excluyendo bloqueados)
@@ -507,25 +357,6 @@ app.get("/api/community/match", async (req, res) => {
   }
 });
 
-app.get("/api/community/:communityId/messages", async (req, res) => {
-  try {
-    const { communityId } = req.params;
-    const result = await db.query(
-      `SELECT m.*, u.nombre_completo as sender_name, u.foto_perfil_url as sender_avatar 
-       FROM mensajes_comunidad m
-       JOIN usuarios u ON m.sender_id = u.id_usuario
-       WHERE m.community_id = $1
-       ORDER BY m.created_at ASC
-       LIMIT 100`,
-      [communityId]
-    );
-    res.json(result.rows);
-  } catch (error) {
-    console.error("Error getting community messages:", error);
-    res.status(500).json({ error: "Error al obtener mensajes" });
-  }
-});
-
 // ─────────────────────────────────────────────
 // ENDPOINT: Bloquear usuario
 // POST /api/users/block  { id_bloqueador, id_bloqueado }
@@ -578,37 +409,6 @@ app.delete("/api/users/block", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// ENDPOINT: Verificar si un usuario está bloqueado
-// GET /api/users/check-block?userId1=...&userId2=...
-// ─────────────────────────────────────────────
-app.get("/api/users/check-block", async (req, res) => {
-  try {
-    const { userId1, userId2 } = req.query;
-    if (!userId1 || !userId2) {
-      return res.status(400).json({ error: "Faltan parámetros" });
-    }
-    const result = await db.query(
-      `SELECT id_bloqueador 
-       FROM usuarios_bloqueados 
-       WHERE (id_bloqueador = $1::uuid AND id_bloqueado = $2::uuid)
-          OR (id_bloqueador = $2::uuid AND id_bloqueado = $1::uuid)
-       LIMIT 1`,
-      [userId1, userId2]
-    );
-    if (result.rows.length > 0) {
-      return res.json({ 
-        isBlocked: true, 
-        blockedByMe: result.rows[0].id_bloqueador === userId1 
-      });
-    }
-    res.json({ isBlocked: false, blockedByMe: false });
-  } catch (error) {
-    console.error("Error check-block:", error);
-    res.status(500).json({ error: "Error al verificar bloqueo" });
-  }
-});
-
-// ─────────────────────────────────────────────
 // MENSAJES DIRECTOS (persistencia en BD)
 // ─────────────────────────────────────────────
 
@@ -628,17 +428,6 @@ app.get("/api/users/check-block", async (req, res) => {
         read_at      TIMESTAMP WITH TIME ZONE,
         created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
-      CREATE TABLE IF NOT EXISTS mensajes_comunidad (
-        id           SERIAL PRIMARY KEY,
-        community_id VARCHAR(100) NOT NULL,
-        sender_id    UUID NOT NULL REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
-        content      TEXT NOT NULL,
-        message_type VARCHAR(20) NOT NULL DEFAULT 'text',
-        media_url    TEXT,
-        status       VARCHAR(20) NOT NULL DEFAULT 'sent',
-        read_by      TEXT[] DEFAULT '{}',
-        created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
     `);
     await db.query(
       `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_type VARCHAR(20) NOT NULL DEFAULT 'text';`,
@@ -654,27 +443,6 @@ app.get("/api/users/check-block", async (req, res) => {
     );
     await db.query(
       `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE;`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_everyone BOOLEAN DEFAULT false;`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_sender BOOLEAN DEFAULT false;`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS deleted_for_receiver BOOLEAN DEFAULT false;`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS message_type VARCHAR(20) NOT NULL DEFAULT 'text';`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS media_url TEXT;`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'sent';`,
-    );
-    await db.query(
-      `ALTER TABLE mensajes_comunidad ADD COLUMN IF NOT EXISTS read_by TEXT[] DEFAULT '{}';`,
     );
     // Índice para acelerar consultas por conversación
     await db.query(`
@@ -830,8 +598,7 @@ app.get("/api/conversations", async (req, res) => {
              ORDER BY m.created_at DESC, m.id DESC
            ) AS rn
          FROM mensajes m
-         WHERE (m.sender_id = $1::uuid AND m.deleted_for_sender = false)
-            OR (m.receiver_id = $1::uuid AND m.deleted_for_receiver = false)
+         WHERE m.sender_id = $1::uuid OR m.receiver_id = $1::uuid
        )
        SELECT
          um.other_user_id,
@@ -839,7 +606,7 @@ app.get("/api/conversations", async (req, res) => {
          u.correo_electronico,
          u.rol_usuario,
          um.id AS last_message_id,
-         CASE WHEN um.deleted_for_everyone THEN '🚫 Este mensaje fue eliminado' ELSE um.content END AS last_message,
+         um.content AS last_message,
          um.message_type,
          um.media_url,
          um.status AS last_message_status,
@@ -887,10 +654,10 @@ app.get("/api/messages", async (req, res) => {
     );
 
     const result = await db.query(
-      `SELECT id, sender_id, receiver_id, content, message_type, media_url, status, delivered_at, read_at, created_at, deleted_for_everyone
+      `SELECT id, sender_id, receiver_id, content, message_type, media_url, status, delivered_at, read_at, created_at
          FROM mensajes
-        WHERE (sender_id = $1 AND receiver_id = $2 AND deleted_for_sender = false)
-           OR (sender_id = $2 AND receiver_id = $1 AND deleted_for_receiver = false)
+        WHERE (sender_id = $1 AND receiver_id = $2)
+           OR (sender_id = $2 AND receiver_id = $1)
         ORDER BY created_at ASC
         LIMIT 100`,
       [senderId, receiverId],
@@ -1017,95 +784,30 @@ app.put("/api/messages/read", async (req, res) => {
   }
 });
 
-app.delete("/api/messages/:id", async (req, res) => {
-  const { id } = req.params;
-  const { userId, type } = req.query; // type = 'for_me' | 'for_everyone'
-
-  try {
-    const msgResult = await db.query(`SELECT sender_id, receiver_id FROM mensajes WHERE id = $1`, [id]);
-    if (msgResult.rows.length === 0) return res.status(404).json({ error: "Mensaje no encontrado" });
-
-    const msg = msgResult.rows[0];
-
-    if (type === 'for_everyone') {
-      if (msg.sender_id !== userId) return res.status(403).json({ error: "No tienes permiso" });
-      
-      await db.query(`UPDATE mensajes SET deleted_for_everyone = true WHERE id = $1`, [id]);
-      
-      io.to(userRoom(msg.receiver_id)).emit("message_deleted_for_everyone", { messageId: id });
-    } else { // for_me
-      if (msg.sender_id === userId) {
-        await db.query(`UPDATE mensajes SET deleted_for_sender = true WHERE id = $1`, [id]);
-      } else if (msg.receiver_id === userId) {
-        await db.query(`UPDATE mensajes SET deleted_for_receiver = true WHERE id = $1`, [id]);
-      } else {
-        return res.status(403).json({ error: "No tienes permiso" });
-      }
-    }
-    
-    // Update conversation list for both users
-    io.to(userRoom(msg.sender_id)).emit("conversations_updated", { userId: msg.sender_id });
-    io.to(userRoom(msg.receiver_id)).emit("conversations_updated", { userId: msg.receiver_id });
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error("[DELETE /api/messages]", error);
-    res.status(500).json({ error: "Error al borrar mensaje" });
-  }
-});
-
 // Helper for sending role-based emails
 
 const sendEmail = async (to, subject, htmlContent) => {
   if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
-      const emailUserLower = process.env.EMAIL_USER.toLowerCase();
-      const isOutlook = emailUserLower.includes("@outlook.") ||
-                        emailUserLower.includes("@hotmail.") ||
-                        emailUserLower.includes("@live.");
-
-      const transportConfig = process.env.EMAIL_HOST
-        ? {
-            host: process.env.EMAIL_HOST,
-            port: Number(process.env.EMAIL_PORT) || 587,
-            secure: process.env.EMAIL_SECURE === "true",
-            auth: {
-              user: process.env.EMAIL_USER,
-              pass: process.env.EMAIL_PASS,
-            },
-          }
-        : isOutlook
-          ? {
-              host: "smtp-mail.outlook.com",
-              port: 587,
-              secure: false,
-              tls: { ciphers: "SSLv3" },
-              auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS,
-              },
-            }
-          : {
-              service: "gmail",
-              auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS,
-              },
-            };
-
-      const transporter = nodemailer.createTransport(transportConfig);
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
       await transporter.sendMail({
         from: '"Rumbo App" <' + process.env.EMAIL_USER + ">",
         to,
         subject,
         html: htmlContent,
       });
-      console.log("[RUMBO EMAIL] Enviado a %s: %s", String(to), String(subject));
+      console.log(`[RUMBO EMAIL] Enviado a ${to}: ${subject}`);
     } catch (error) {
-      console.error("[RUMBO EMAIL ERROR] No se pudo enviar a %s", String(to), error);
+      console.error(`[RUMBO EMAIL ERROR] No se pudo enviar a ${to}`, error);
     }
   } else {
-    console.log("[RUMBO SIMULADO EMAIL a %s] Asunto: %s", String(to), String(subject));
+    console.log(`[RUMBO SIMULADO EMAIL a ${to}] Asunto: ${subject}`);
   }
 };
 
@@ -1264,7 +966,7 @@ app.post("/api/register", async (req, res) => {
     // Insertar en la BD
     const result = await db.query(
       `INSERT INTO usuarios (nombre_completo, correo_electronico, contrasena_hash, numero_telefono, tipo_cuenta, id_universidad) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_usuario, nombre_completo, correo_electronico, rol_usuario`,
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id_usuario, nombre_completo, correo_electronico`,
       [
         nombre_completo,
         correo_electronico,
@@ -1275,18 +977,7 @@ app.post("/api/register", async (req, res) => {
       ],
     );
 
-    const newUser = result.rows[0];
-    const token = jwt.sign(
-      {
-        id: newUser.id_usuario,
-        email: newUser.correo_electronico,
-        rol: newUser.rol_usuario || "pasajero",
-      },
-      JWT_SECRET,
-      { expiresIn: "30d" }
-    );
-
-    res.status(201).json({ ...newUser, token });
+    res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error al registrar usuario" });
@@ -1316,19 +1007,8 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
-    const token = jwt.sign(
-      {
-        id: user.id_usuario,
-        email: user.correo_electronico,
-        rol: user.rol_usuario,
-      },
-      JWT_SECRET,
-      { expiresIn: "30d" }
-    );
-
     res.json({
       message: "Login exitoso",
-      token,
       user: {
         id: user.id_usuario,
         nombre: user.nombre_completo,
@@ -1343,13 +1023,8 @@ app.post("/api/login", async (req, res) => {
 });
 
 // 5. Obtener todos los usuarios (Panel Admin)
-app.get("/api/users", optionalAuthenticateToken, async (req, res) => {
+app.get("/api/users", async (req, res) => {
   try {
-    const isAuth = req.user || req.headers["x-admin-key"] === (process.env.ADMIN_SECRET || "rumbo_admin_2026");
-    if (!isAuth) {
-      return res.status(401).json({ error: "Acceso denegado. Se requiere autenticación como administrador para consultar el listado general de usuarios." });
-    }
-
     const result = await db.query(
       "SELECT id_usuario, nombre_completo, correo_electronico, rol_usuario, estado_cuenta, tipo_cuenta, fecha_registro FROM usuarios ORDER BY fecha_registro DESC",
     );
@@ -1631,101 +1306,6 @@ app.post("/api/trips", async (req, res) => {
   }
 });
 
-// 11.5 Solicitar viaje (Pasajero)
-app.post("/api/trip-requests", async (req, res) => {
-  try {
-    const { id_pasajero, origen, destino, fecha_hora_solicitada } = req.body;
-    if (!id_pasajero || !origen || !destino || !fecha_hora_solicitada) {
-      return res.status(400).json({ error: "Datos incompletos para solicitar viaje" });
-    }
-
-    const result = await db.query(
-      `INSERT INTO solicitudes_viaje (id_pasajero, origen, destino, fecha_hora_solicitada, estado)
-       VALUES ($1, $2, $3, $4, 'pendiente')
-       RETURNING *`,
-      [id_pasajero, origen, destino, fecha_hora_solicitada]
-    );
-
-    // Emit via socket if needed
-    io.emit("new_trip_request", result.rows[0]);
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    console.error("Error al solicitar viaje:", error);
-    res.status(500).json({ error: "Error interno del servidor" });
-  }
-});
-
-// 11.6 Obtener solicitudes de viaje pendientes (Para conductores)
-app.get("/api/trip-requests", async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT sr.*, u.nombre_completo as nombre_pasajero, u.foto_perfil as avatar_pasajero
-       FROM solicitudes_viaje sr
-       JOIN usuarios u ON sr.id_pasajero = u.id_usuario
-       WHERE sr.estado = 'pendiente'
-       ORDER BY sr.fecha_creacion DESC`
-    );
-    res.json(result.rows);
-  } catch (error) {
-    console.error("Error al obtener solicitudes de viaje:", error);
-    res.status(500).json({ error: "Error interno del servidor" });
-  }
-});
-
-// 11.7 Conductor acepta una solicitud de viaje
-app.post("/api/trips/accept-request", async (req, res) => {
-  try {
-    const { id_solicitud, id_conductor, id_vehiculo } = req.body;
-    
-    // 1. Verificar que la solicitud existe y está pendiente
-    const solicitudRes = await db.query(
-      `SELECT * FROM solicitudes_viaje WHERE id_solicitud = $1 AND estado = 'pendiente'`,
-      [id_solicitud]
-    );
-    
-    if (solicitudRes.rows.length === 0) {
-      return res.status(400).json({ error: "La solicitud ya no está disponible" });
-    }
-    
-    const solicitud = solicitudRes.rows[0];
-    
-    // 2. Crear el viaje activo
-    const viajeRes = await db.query(
-      `INSERT INTO viajes 
-       (id_conductor, id_vehiculo, origen_viaje, destino_viaje, fecha_hora_salida, precio_asiento, estado_viaje, tipo_viaje)
-       VALUES ($1, $2, $3, $4, NOW(), 0, 'programado', 'inmediato')
-       RETURNING *`,
-      [id_conductor, id_vehiculo, solicitud.origen, solicitud.destino]
-    );
-    
-    const nuevoViaje = viajeRes.rows[0];
-    
-    // 3. Añadir al pasajero al viaje
-    await db.query(
-      `INSERT INTO pasajeros_viaje (id_viaje, id_pasajero, estado_reserva)
-       VALUES ($1, $2, 'confirmada')`,
-      [nuevoViaje.id_viaje, solicitud.id_pasajero]
-    );
-    
-    // 4. Actualizar la solicitud a aceptada
-    await db.query(
-      `UPDATE solicitudes_viaje SET estado = 'aceptado' WHERE id_solicitud = $1`,
-      [id_solicitud]
-    );
-    
-    // 5. Emitir eventos socket
-    io.emit("trip_request_accepted", { id_solicitud, viaje: nuevoViaje });
-    io.emit("trip_created", nuevoViaje);
-    
-    res.json({ message: "Solicitud aceptada exitosamente", viaje: nuevoViaje });
-  } catch (error) {
-    console.error("Error al aceptar solicitud de viaje:", error);
-    res.status(500).json({ error: "Error interno del servidor" });
-  }
-});
-
-
 // 12. Obtener viajes del conductor
 app.get("/api/trips/driver/:userId", async (req, res) => {
   try {
@@ -1750,15 +1330,7 @@ app.get("/api/trips/driver/:userId", async (req, res) => {
 app.get("/api/trips/available", async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT v.*, u.nombre_completo as nombre_conductor, ve.marca, ve.modelo, ve.placa, ve.color, ve.tipo_vehiculo,
-       (
-         SELECT COALESCE(json_agg(asientos), '[]'::json)
-         FROM (
-           SELECT jsonb_array_elements_text(pv.asientos_seleccionados)::int AS asientos
-           FROM pasajeros_viaje pv
-           WHERE pv.id_viaje = v.id_viaje AND pv.estado_reserva = 'confirmada'
-         ) as sub
-       ) as ocupados
+      `SELECT v.*, u.nombre_completo as nombre_conductor, ve.marca, ve.modelo, ve.placa, ve.color
        FROM viajes v
        JOIN usuarios u ON v.id_conductor = u.id_usuario
        LEFT JOIN vehiculos ve ON v.id_vehiculo = ve.id_vehiculo
@@ -1803,7 +1375,6 @@ app.put("/api/trips/:tripId/status", async (req, res) => {
     }
 
     await client.query("COMMIT");
-    io.emit("trip_status_changed", { tripId, status: estado_viaje, trip: result.rows[0] });
     res.json({ message: "Estado de viaje actualizado", trip: result.rows[0] });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
@@ -1819,12 +1390,8 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
   const client = await db.pool.connect();
   try {
     const { tripId } = req.params;
-    const { id_pasajero, asientos_reservados, asientos_seleccionados, metodo_pago } = req.body;
-    
-    let selectedSeatsArr = asientos_seleccionados || [];
-    if (!Array.isArray(selectedSeatsArr)) selectedSeatsArr = [];
-    
-    const seats = Number(selectedSeatsArr.length > 0 ? selectedSeatsArr.length : (asientos_reservados || 1));
+    const { id_pasajero, asientos_reservados, metodo_pago } = req.body;
+    const seats = Number(asientos_reservados || 1);
     const paymentMethod = metodo_pago || "billetera";
 
     if (!id_pasajero || !Number.isInteger(seats) || seats <= 0) {
@@ -1856,21 +1423,6 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
       return res
         .status(400)
         .json({ error: "No hay suficientes asientos disponibles" });
-    }
-
-    if (selectedSeatsArr.length > 0) {
-      const occupiedQuery = await client.query(
-        `SELECT jsonb_array_elements_text(asientos_seleccionados)::int AS asiento
-         FROM pasajeros_viaje
-         WHERE id_viaje = $1 AND estado_reserva = 'confirmada'`,
-        [tripId]
-      );
-      const occupiedSeats = occupiedQuery.rows.map(r => Number(r.asiento));
-      const hasConflict = selectedSeatsArr.some(s => occupiedSeats.includes(Number(s)));
-      if (hasConflict) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ error: "Uno o más de los asientos seleccionados ya fueron reservados por otra persona." });
-      }
     }
 
     const alreadyBooked = await client.query(
@@ -1920,10 +1472,10 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
 
     const booking = await client.query(
       `INSERT INTO pasajeros_viaje
-        (id_viaje, id_pasajero, asientos_reservados, asientos_seleccionados, estado_reserva, monto_pagado, estado_pago, metodo_pago)
-       VALUES ($1, $2, $3, $4, 'confirmada', $5, 'pagado', $6)
+        (id_viaje, id_pasajero, asientos_reservados, estado_reserva, monto_pagado, estado_pago, metodo_pago)
+       VALUES ($1, $2, $3, 'confirmada', $4, 'pagado', $5)
        RETURNING *`,
-      [tripId, id_pasajero, seats, JSON.stringify(selectedSeatsArr), totalAmount, paymentMethod],
+      [tripId, id_pasajero, seats, totalAmount, paymentMethod],
     );
 
     await client.query(
@@ -1981,7 +1533,6 @@ app.post("/api/trips/:tripId/book", async (req, res) => {
     );
 
     await client.query("COMMIT");
-    io.emit("trip_booked", { tripId, passengerId: id_pasajero, seats });
     res.status(201).json({
       ...booking.rows[0],
       total_pagado: totalAmount,
@@ -2071,7 +1622,7 @@ app.get("/api/earnings/:userId", async (req, res) => {
   }
 });
 
-// 19. Registrar transacción de billetera
+// 18. Registrar transacción de billetera
 app.post("/api/transactions", async (req, res) => {
   try {
     const { id_usuario, tipo_transaccion, monto, id_viaje_relacionado } =
@@ -2474,25 +2025,6 @@ app.post("/api/alerts", async (req, res) => {
     };
     io.emit("centinela_alert", payload);
     io.emit("support_emergency", payload);
-
-    // Enviar correo a Valery o al administrador
-    try {
-      const emailDest = process.env.SUPPORT_EMAIL || "Valery@hotmail.com";
-      const subject = `🚨 EMERGENCIA CENTINELA ACTIVADA: ${safeDescription}`;
-      const htmlContent = `
-        <h2>Alerta de Emergencia Centinela</h2>
-        <p><strong>Usuario ID:</strong> ${safeUserId}</p>
-        <p><strong>Tipo:</strong> ${safeActivation}</p>
-        <p><strong>Descripción:</strong> ${safeDescription}</p>
-        <p><strong>Ubicación:</strong> <a href="https://www.google.com/maps/search/?api=1&query=${safeLatitude},${safeLongitude}">Ver en el mapa</a></p>
-        <p><strong>Transcripción:</strong> ${transcript || 'No disponible'}</p>
-        <p>Por favor revisa el panel de soporte para más detalles.</p>
-      `;
-      await sendEmail(emailDest, subject, htmlContent);
-    } catch (emailErr) {
-      console.error("Error al enviar email de centinela a Valery:", emailErr);
-    }
-
     res.status(201).json(payload);
   } catch (error) {
     console.error(error);
@@ -2679,10 +2211,7 @@ app.post("/api/tickets", async (req, res) => {
       ],
     );
 
-    const newTicket = result.rows[0];
-    io.emit("new_support_ticket", newTicket);
-
-    res.status(201).json(newTicket);
+    res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error(error);
     res.status(error.statusCode || 500).json({
@@ -2749,7 +2278,7 @@ app.put("/api/tickets/:id/status", async (req, res) => {
 function saveWalletReceipt({ comprobante_nombre, comprobante_base64 }) {
   if (!comprobante_base64) return null;
 
-  const rawName = String(comprobante_nombre || "comprobante.jpg");
+  const rawName = comprobante_nombre || "comprobante.jpg";
   const ext = path.extname(rawName).toLowerCase() || ".jpg";
   const allowed = new Set([".jpg", ".jpeg", ".png", ".webp", ".pdf"]);
   if (!allowed.has(ext)) {
@@ -2768,22 +2297,17 @@ function saveWalletReceipt({ comprobante_nombre, comprobante_base64 }) {
     throw error;
   }
 
-  const receiptsDir = path.resolve(__dirname, "uploads", "wallet-receipts");
+  const receiptsDir = path.join(__dirname, "uploads", "wallet-receipts");
   fs.mkdirSync(receiptsDir, { recursive: true });
-  const safeExt = ext.replace(/[^a-z0-9.]/g, "");
-  const fileName = `${crypto.randomUUID()}${safeExt}`;
-  const targetPath = path.resolve(receiptsDir, fileName);
-  if (!targetPath.startsWith(receiptsDir)) {
-    throw new Error("Ruta de archivo no válida");
-  }
-  fs.writeFileSync(targetPath, buffer);
+  const fileName = `${crypto.randomUUID()}${ext}`;
+  fs.writeFileSync(path.join(receiptsDir, fileName), buffer);
   return `/uploads/wallet-receipts/${fileName}`;
 }
 
 function saveSupportEvidence({ evidencia_nombre, evidencia_base64 }) {
   if (!evidencia_base64) return null;
 
-  const rawName = String(evidencia_nombre || "evidencia.jpg");
+  const rawName = evidencia_nombre || "evidencia.jpg";
   const ext = path.extname(rawName).toLowerCase() || ".jpg";
   const allowed = new Set([".jpg", ".jpeg", ".png", ".webp", ".pdf", ".mp4"]);
   if (!allowed.has(ext)) {
@@ -2802,15 +2326,10 @@ function saveSupportEvidence({ evidencia_nombre, evidencia_base64 }) {
     throw error;
   }
 
-  const evidenceDir = path.resolve(__dirname, "uploads", "support-evidence");
+  const evidenceDir = path.join(__dirname, "uploads", "support-evidence");
   fs.mkdirSync(evidenceDir, { recursive: true });
-  const safeExt = ext.replace(/[^a-z0-9.]/g, "");
-  const fileName = `${crypto.randomUUID()}${safeExt}`;
-  const targetPath = path.resolve(evidenceDir, fileName);
-  if (!targetPath.startsWith(evidenceDir)) {
-    throw new Error("Ruta de archivo no válida");
-  }
-  fs.writeFileSync(targetPath, buffer);
+  const fileName = `${crypto.randomUUID()}${ext}`;
+  fs.writeFileSync(path.join(evidenceDir, fileName), buffer);
   return `/uploads/support-evidence/${fileName}`;
 }
 
@@ -2947,103 +2466,9 @@ app.get("/api/trips", async (req, res) => {
   }
 });
 
-app.get("/api/community/match", async (req, res) => {
-  const email = req.query.email || "";
-  let domain = "";
-  if (email.includes("@")) {
-    const parts = email.split("@")[1].split(".");
-    if (parts.length > 0) domain = parts[0].toUpperCase();
-  }
-  if (!domain) domain = "GENERAL";
-
-  try {
-    const query = `
-      SELECT id_usuario, nombre_completo, correo_electronico, foto_perfil_url, rol_usuario
-      FROM usuarios
-      WHERE split_part(correo_electronico, '@', 2) ILIKE $1 || '.%'
-      LIMIT 100
-    `;
-    const users = await db.query(query, [domain.toLowerCase()]);
-    
-    if (domain === "GENERAL" || users.rows.length === 0) {
-      const generalUsers = await db.query(`SELECT id_usuario, nombre_completo, foto_perfil_url, rol_usuario FROM usuarios LIMIT 50`);
-      return res.json({
-        university: "Comunidad General",
-        members: generalUsers.rows
-      });
-    }
-
-    res.json({
-      university: `Universidad ${domain}`,
-      members: users.rows
-    });
-  } catch(e) {
-    console.error(e);
-    res.status(500).json({error: "Server error"});
-  }
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(
+    `🚀 Servidor backend de Rumbo corriendo en http://localhost:${PORT}`,
+  );
 });
-
-// ==========================================
-// OTA - AUTO-ACTUALIZACIÓN
-// ==========================================
-app.get("/api/config/version", async (req, res) => {
-  try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS app_config (
-        id SERIAL PRIMARY KEY,
-        version_name VARCHAR(50) NOT NULL,
-        version_code INT NOT NULL,
-        download_url TEXT NOT NULL,
-        is_mandatory BOOLEAN DEFAULT false,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    // Comprobar si está vacía
-    const countRes = await db.query('SELECT COUNT(*) FROM app_config');
-    if (parseInt(countRes.rows[0].count) === 0) {
-      await db.query(`
-        INSERT INTO app_config (version_name, version_code, download_url, is_mandatory) 
-        VALUES ('1.0.0', 1, 'https://github.com/RumboApp', false);
-      `);
-    }
-
-    const configRes = await db.query('SELECT * FROM app_config ORDER BY id DESC LIMIT 1');
-    res.json(configRes.rows[0]);
-  } catch (error) {
-    console.error("Error al obtener config:", error);
-    res.status(500).json({ error: "Error obteniendo configuración" });
-  }
-});
-
-// ==========================================
-// AUTO-EXPIRACIÓN DE VIAJES Y SOLICITUDES
-// ==========================================
-setInterval(async () => {
-  try {
-    // Expirar viajes programados que ya pasaron
-    await db.query(`
-      UPDATE viajes 
-      SET estado_viaje = 'cancelado' 
-      WHERE estado_viaje = 'programado' 
-        AND fecha_hora_salida < NOW() - INTERVAL '30 minutes'
-    `);
-    
-    // Expirar solicitudes pendientes que ya pasaron
-    await db.query(`
-      UPDATE solicitudes_viaje 
-      SET estado = 'expirado' 
-      WHERE estado = 'pendiente' 
-        AND fecha_hora_solicitada < NOW() - INTERVAL '30 minutes'
-    `);
-  } catch (error) {
-    console.error("Error al limpiar viajes/solicitudes expirados:", error);
-  }
-}, 60000); // Revisar cada minuto
-
-  const PORT = process.env.PORT || 3000;
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(
-      `🚀 Servidor backend de Rumbo corriendo en http://0.0.0.0:${PORT}`,
-    );
-  });
